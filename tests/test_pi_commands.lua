@@ -1173,6 +1173,73 @@ local function test_virtualtext_wiped_buffer_only_notifies()
   MiniTest.expect.equality(notes[1].msg, "Pi done")
 end
 
+local function test_virtualtext_survives_anchor_deletion_via_cursor()
+  setup_test_env()
+  use_virtualtext()
+  setup_buffer({ "a", "b", "c", "d" }, "/test/vt.lua")
+  set_cursor(2)
+
+  local system = run_pi_ask("go")
+  MiniTest.expect.equality(status_marks()[1].line, 2)
+
+  child.api.nvim_buf_set_lines(0, 1, 2, false, {})
+  set_cursor(3)
+  system.stdout('{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta"}}\n')
+  flush()
+
+  local marks = status_marks()
+  MiniTest.expect.equality(#marks, 1)
+  MiniTest.expect.equality(marks[1].line, 3)
+  MiniTest.expect.equality(marks[1].text:match("Pi thinking") ~= nil, true)
+end
+
+local function test_virtualtext_reanchors_to_clamped_line_when_window_gone()
+  setup_test_env()
+  use_virtualtext()
+  setup_buffer({ "a", "b", "c", "d" }, "/test/vt.lua")
+  set_cursor(4)
+
+  local system = run_pi_ask("go")
+  MiniTest.expect.equality(status_marks()[1].line, 4)
+
+  child.lua([[
+    local buf = vim.api.nvim_get_current_buf()
+    vim.cmd("new")
+    vim.api.nvim_buf_set_lines(buf, 1, 4, false, {})
+    vim.api.nvim_win_close(require("pi")._get_active_session().source_winnr, true)
+  ]])
+  system.stdout('{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta"}}\n')
+  flush()
+
+  local marks = child.lua_get([[
+    (function()
+      local ns = vim.api.nvim_create_namespace("pi_status")
+      local buf = require("pi")._get_active_session().source_bufnr
+      local out = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {})) do
+        out[#out + 1] = m[2] + 1
+      end
+      return out
+    end)()
+  ]])
+  MiniTest.expect.equality(marks, { 1 })
+end
+
+local function test_virtualtext_extmark_is_invalidating()
+  setup_test_env()
+  use_virtualtext()
+  setup_buffer({ "a", "b" }, "/test/vt.lua")
+  run_pi_ask("go")
+  local details = child.lua_get([[
+    (function()
+      local ns = vim.api.nvim_create_namespace("pi_status")
+      local m = vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })[1]
+      return { invalidate = m[4].invalidate, undo_restore = m[4].undo_restore }
+    end)()
+  ]])
+  MiniTest.expect.equality(details, { invalidate = true, undo_restore = false })
+end
+
 local T = MiniTest.new_set()
 
 T["PiAsk"] = MiniTest.new_set()
@@ -1235,5 +1302,8 @@ T["virtualtext"]["cancel lingers and warns"] = test_virtualtext_cancel_lingers_a
 T["virtualtext"]["error persists until cursor moves"] = test_virtualtext_error_persists_until_cursor_moved
 T["virtualtext"]["error clears after error_ms"] = test_virtualtext_error_clears_after_error_ms
 T["virtualtext"]["wiped buffer only notifies"] = test_virtualtext_wiped_buffer_only_notifies
+T["virtualtext"]["extmark invalidates on delete"] = test_virtualtext_extmark_is_invalidating
+T["virtualtext"]["re-anchors to cursor after anchor deleted"] = test_virtualtext_survives_anchor_deletion_via_cursor
+T["virtualtext"]["re-anchors to clamped line without window"] = test_virtualtext_reanchors_to_clamped_line_when_window_gone
 
 return T

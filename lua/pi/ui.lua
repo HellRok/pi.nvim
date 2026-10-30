@@ -145,12 +145,34 @@ local function render_virtualtext(session)
     return
   end
 
-  local line = math.min(math.max(session.anchor_line or 1, 1), vim.api.nvim_buf_line_count(bufnr))
+  local count = vim.api.nvim_buf_line_count(bufnr)
+  local line = session.anchor_line or 1
+  local id = session.status_extmark
+
+  if id then
+    local mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, id, { details = true })
+    if #mark > 0 and not mark[3].invalid then
+      line = mark[1] + 1
+    else
+      -- Edits invalidated or deleted the anchor: re-anchor at the cursor,
+      -- or at the clamped old line when the source window is gone.
+      pcall(vim.api.nvim_buf_del_extmark, bufnr, ns, id)
+      id = nil
+      local win = session.source_winnr
+      if win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == bufnr then
+        line = vim.api.nvim_win_get_cursor(win)[1]
+      end
+    end
+  end
+
+  line = math.min(math.max(line, 1), count)
   session.anchor_line = line
   session.status_extmark = vim.api.nvim_buf_set_extmark(bufnr, ns, line - 1, 0, {
-    id = session.status_extmark,
+    id = id,
     virt_text = { { text, session.status == "error" and "PiStatusError" or "PiStatus" } },
     virt_text_pos = "eol",
+    invalidate = true,
+    undo_restore = false,
   })
 end
 
