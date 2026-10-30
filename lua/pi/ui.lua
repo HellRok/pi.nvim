@@ -162,6 +162,52 @@ local function clear_virtualtext(session)
   session.status_extmark = nil
 end
 
+local pending = nil
+
+--- Clears a lingering final-state status immediately.
+local function flush_pending()
+  local current = pending
+  if not current then
+    return
+  end
+  pending = nil
+  if current.timer then
+    current.timer:stop()
+    current.timer:close()
+  end
+  pcall(vim.api.nvim_del_augroup_by_id, current.group)
+  clear_virtualtext(current.session)
+end
+
+local function schedule_clear(session)
+  flush_pending()
+  local cfg = require("pi.config").get().ui
+  local is_error = session.status == "error"
+  local current = {
+    session = session,
+    group = vim.api.nvim_create_augroup("PiStatusClear", { clear = true }),
+  }
+  pending = current
+
+  current.timer = vim.loop.new_timer()
+  current.timer:start(is_error and cfg.error_ms or cfg.linger_ms, 0, vim.schedule_wrap(function()
+    if pending == current then
+      flush_pending()
+    end
+  end))
+
+  if is_error then
+    vim.api.nvim_create_autocmd({ "CursorMoved", "InsertEnter" }, {
+      group = current.group,
+      callback = function()
+        if pending == current then
+          flush_pending()
+        end
+      end,
+    })
+  end
+end
+
 local function render(session)
   if session.ui_backend == "virtualtext" then
     render_virtualtext(session)
@@ -177,6 +223,25 @@ local function stop_timer(session)
     session.ui_timer:stop()
     session.ui_timer:close()
     session.ui_timer = nil
+  end
+end
+
+--- Shows the final state, lingers, and fires the single completion notify.
+local function finalize_virtualtext(session)
+  if session.ui_finalized then
+    return
+  end
+  session.ui_finalized = true
+  stop_timer(session)
+
+  local bufnr = session.source_bufnr
+  local message = status_line(session)
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    render_virtualtext(session)
+    schedule_clear(session)
+  end
+  if message then
+    vim.notify(message, notification_level(session), { title = title_for(session) })
   end
 end
 
@@ -244,6 +309,7 @@ function M.open(session, focus)
   session.ui_backend = pick_backend(session)
 
   if session.ui_backend == "virtualtext" then
+    flush_pending()
     vim.api.nvim_buf_clear_namespace(session.source_bufnr, ns, 0, -1)
   end
 
@@ -264,7 +330,7 @@ function M.update(session)
   else
     stop_timer(session)
     if session.ui_backend == "virtualtext" then
-      clear_virtualtext(session)
+      finalize_virtualtext(session)
       return
     end
   end
@@ -280,7 +346,7 @@ function M.close(session)
     elseif session.status ~= "error" then
       session.status = "done"
     end
-    clear_virtualtext(session)
+    finalize_virtualtext(session)
     return
   end
 

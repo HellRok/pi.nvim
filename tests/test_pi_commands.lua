@@ -989,6 +989,10 @@ local function status_marks()
   ]])
 end
 
+local function wait_ms(ms)
+  child.lua(string.format([[vim.wait(%d, function() return false end, 10)]], ms))
+end
+
 local function test_virtualtext_shows_status_at_cursor_line()
   setup_test_env()
   use_virtualtext()
@@ -1032,13 +1036,14 @@ end
 
 local function test_virtualtext_clears_when_session_ends()
   setup_test_env()
-  use_virtualtext()
+  use_virtualtext({ linger_ms = 50 })
   setup_buffer({ "a" }, "/test/vt.lua")
 
   local system = run_pi_ask("go")
   MiniTest.expect.equality(#status_marks(), 1)
   system.stdout('{"type":"agent_end"}\n')
   system.exit(0, 0)
+  wait_ms(200)
   MiniTest.expect.equality(#status_marks(), 0)
 
   -- A fresh run clears stale marks at start and cancel clears too.
@@ -1047,6 +1052,7 @@ local function test_virtualtext_clears_when_session_ends()
   MiniTest.expect.equality(#status_marks(), 1)
   MiniTest.expect.equality(status_marks()[1].text == "stale", false)
   child.cmd("PiCancel")
+  wait_ms(200)
   MiniTest.expect.equality(#status_marks(), 0)
 end
 
@@ -1073,6 +1079,98 @@ local function test_ui_backend_selection()
   setup_test_env()
   local ok = child.lua_get([[(pcall(require("pi").setup, { ui = { backend = "bogus" } }))]])
   MiniTest.expect.equality(ok, false)
+end
+
+local function test_virtualtext_done_lingers_then_clears_with_one_notify()
+  setup_test_env()
+  use_virtualtext({ linger_ms = 150 })
+  setup_buffer({ "a" }, "/test/vt.lua")
+
+  local system = run_pi_ask("go")
+  system.stdout('{"type":"agent_end"}\n')
+  system.exit(0, 0)
+
+  local marks = status_marks()
+  MiniTest.expect.equality(#marks, 1)
+  MiniTest.expect.equality(marks[1].text, "Pi done")
+  wait_ms(300)
+  MiniTest.expect.equality(#status_marks(), 0)
+
+  local notes = notifications()
+  MiniTest.expect.equality(#notes, 1)
+  MiniTest.expect.equality(notes[1].msg, "Pi done")
+  MiniTest.expect.equality(notes[1].level, child.lua_get([[vim.log.levels.INFO]]))
+end
+
+local function test_virtualtext_cancel_lingers_and_warns()
+  setup_test_env()
+  use_virtualtext({ linger_ms = 150 })
+  setup_buffer({ "a" }, "/test/vt.lua")
+
+  run_pi_ask("go")
+  child.cmd("PiCancel")
+  MiniTest.expect.equality(status_marks()[1].text, "Pi cancelled")
+  wait_ms(300)
+  MiniTest.expect.equality(#status_marks(), 0)
+
+  local notes = notifications()
+  MiniTest.expect.equality(#notes, 1)
+  MiniTest.expect.equality(notes[1].level, child.lua_get([[vim.log.levels.WARN]]))
+end
+
+local function test_virtualtext_error_persists_until_cursor_moved()
+  setup_test_env()
+  use_virtualtext({ linger_ms = 50, error_ms = 5000 })
+  setup_buffer({ "a", "b" }, "/test/vt.lua")
+
+  local system = run_pi_ask("break")
+  system.stdout('{"type":"response","success":false,"error":"boom"}\n')
+  system.exit(1, 0)
+
+  wait_ms(150)
+  local marks = status_marks()
+  MiniTest.expect.equality(#marks, 1)
+  MiniTest.expect.equality(marks[1].text, "boom")
+  MiniTest.expect.equality(marks[1].hl, "PiStatusError")
+
+  child.lua([[vim.api.nvim_exec_autocmds("CursorMoved", {})]])
+  MiniTest.expect.equality(#status_marks(), 0)
+
+  local notes = notifications()
+  MiniTest.expect.equality(#notes, 1)
+  MiniTest.expect.equality(notes[1].level, child.lua_get([[vim.log.levels.ERROR]]))
+end
+
+local function test_virtualtext_error_clears_after_error_ms()
+  setup_test_env()
+  use_virtualtext({ error_ms = 150 })
+  setup_buffer({ "a" }, "/test/vt.lua")
+
+  local system = run_pi_ask("break")
+  system.stdout('{"type":"response","success":false,"error":"boom"}\n')
+  system.exit(1, 0)
+  MiniTest.expect.equality(#status_marks(), 1)
+  wait_ms(300)
+  MiniTest.expect.equality(#status_marks(), 0)
+end
+
+local function test_virtualtext_wiped_buffer_only_notifies()
+  setup_test_env()
+  use_virtualtext()
+  setup_buffer({ "a" }, "/test/vt.lua")
+
+  local system = run_pi_ask("go")
+  child.lua([[
+    local old = vim.api.nvim_get_current_buf()
+    vim.cmd("enew")
+    vim.api.nvim_buf_delete(old, { force = true })
+  ]])
+  system.stdout('{"type":"agent_end"}\n')
+  system.exit(0, 0)
+
+  local notes = notifications()
+  MiniTest.expect.equality(#notes, 1)
+  MiniTest.expect.equality(notes[1].msg, "Pi done")
 end
 
 local T = MiniTest.new_set()
@@ -1132,5 +1230,10 @@ T["virtualtext"]["shows status at cursor line"] = test_virtualtext_shows_status_
 T["virtualtext"]["anchors to selection start"] = test_virtualtext_anchors_to_selection_start
 T["virtualtext"]["clears when session ends"] = test_virtualtext_clears_when_session_ends
 T["virtualtext"]["backend selection"] = test_ui_backend_selection
+T["virtualtext"]["done lingers then clears with one notify"] = test_virtualtext_done_lingers_then_clears_with_one_notify
+T["virtualtext"]["cancel lingers and warns"] = test_virtualtext_cancel_lingers_and_warns
+T["virtualtext"]["error persists until cursor moves"] = test_virtualtext_error_persists_until_cursor_moved
+T["virtualtext"]["error clears after error_ms"] = test_virtualtext_error_clears_after_error_ms
+T["virtualtext"]["wiped buffer only notifies"] = test_virtualtext_wiped_buffer_only_notifies
 
 return T
