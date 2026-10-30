@@ -87,6 +87,14 @@ function M.get_cmd()
     return cmd
 end
 
+local function run_on_finish(session)
+    local fn = session.on_finish
+    session.on_finish = nil
+    if fn then
+        pcall(fn)
+    end
+end
+
 local function set_status(session, status, message)
     if not session or session.closing then
         return
@@ -178,6 +186,7 @@ local function finish_session(session, status, opts)
 
     session.closing = true
     session.status = status
+    run_on_finish(session)
     session.ended_at = vim.loop.hrtime()
 
     if opts.error then
@@ -219,13 +228,21 @@ function M.run(opts)
     local skip_reload = opts.skip_reload
     local on_done = opts.on_done
 
+    local on_finish = opts.on_finish
+
     if active_session then
         vim.notify("pi is already running, please wait", vim.log.levels.WARN)
+        if on_finish then
+            pcall(on_finish)
+        end
         return
     end
 
     if not message or message == "" then
         vim.notify("No message provided", vim.log.levels.ERROR)
+        if on_finish then
+            pcall(on_finish)
+        end
         return
     end
 
@@ -241,6 +258,7 @@ function M.run(opts)
     session.last_message = message
     session.skip_reload = skip_reload
     session.on_done = on_done
+    session.on_finish = on_finish
     local source_win = vim.api.nvim_get_current_win()
     if vim.api.nvim_win_get_buf(source_win) == source_bufnr then
         session.source_winnr = source_win
@@ -352,6 +370,29 @@ function M.prompt_with_buffer()
     end)
 end
 
+local selection_ns = vim.api.nvim_create_namespace("pi_selection")
+vim.api.nvim_set_hl(0, "PiSelection", { link = "Visual", default = true })
+
+--- Keeps the selected lines highlighted while the prompt is open, since
+--- opening the input leaves Visual mode. Returns a function that clears it.
+local function highlight_range(bufnr, range)
+    if range then
+        local last = vim.api.nvim_buf_line_count(bufnr)
+        pcall(vim.api.nvim_buf_set_extmark, bufnr, selection_ns, range.start - 1, 0, {
+            end_row = math.min(range["end"], last),
+            end_col = 0,
+            hl_group = "PiSelection",
+            hl_eol = true,
+            strict = false,
+        })
+    end
+    return function()
+        if vim.api.nvim_buf_is_valid(bufnr) then
+            vim.api.nvim_buf_clear_namespace(bufnr, selection_ns, 0, -1)
+        end
+    end
+end
+
 --- Prompts for input and sends the selected lines as context.
 --- @param opts? table Optional `nvim_create_user_command` callback options.
 function M.prompt_with_selection(opts)
@@ -364,9 +405,11 @@ function M.prompt_with_selection(opts)
     -- Resolve the range before `vim.ui.input` yields: opening the input leaves
     -- Visual mode, so the live selection is gone by the time the callback runs.
     local range = context.get_visual_selection_range(opts)
+    local clear_highlight = highlight_range(bufnr, range)
     vim.ui.input({ prompt = context.format_prompt_label(bufnr, range) }, function(input)
         if input then
             M.run({
+                on_finish = clear_highlight,
                 message = input,
                 bufnr = bufnr,
                 anchor_line = range and range.start,
@@ -374,6 +417,8 @@ function M.prompt_with_selection(opts)
                     return context.get_visual_context(bufnr, config.get(), range)
                 end,
             })
+        else
+            clear_highlight()
         end
     end)
 end
@@ -383,6 +428,7 @@ function M.cancel()
         return
     end
     active_session.cancelled = true
+    run_on_finish(active_session)
     runner.cancel(active_session)
     last_session = active_session
     ui.close(active_session)
