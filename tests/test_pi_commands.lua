@@ -554,6 +554,31 @@ local function test_session_option_enables_session_saving()
   local cmd = child.lua_get([[require("pi").get_cmd()]])
 
   MiniTest.expect.equality(has_arg(cmd, "--no-session"), nil)
+  local idx = has_arg(cmd, "--session-id")
+  MiniTest.expect.no_equality(idx, nil)
+  MiniTest.expect.equality(child.lua_get([[require("pi").get_cmd()]])[idx + 1], cmd[idx + 1])
+end
+
+local function test_pi_open_requires_session()
+  setup_test_env()
+  child.cmd("PiOpen")
+  MiniTest.expect.no_equality(last_notification().msg:match("requires session"), nil)
+end
+
+local function test_pi_open_launches_tmux_window_with_session_id()
+  setup_test_env('require("pi").setup({ session = true })')
+  child.lua([[
+    vim.env.TMUX = "x"
+    _G.__pi_open_cmd = nil
+    vim.system = function(cmd) _G.__pi_open_cmd = cmd return {} end
+  ]])
+  local sid = child.lua_get([[require("pi").get_cmd()]])
+  child.cmd("PiOpen")
+  local cmd = child.lua_get([[_G.__pi_open_cmd]])
+  MiniTest.expect.equality(cmd[1], "tmux")
+  MiniTest.expect.equality(cmd[2], "new-window")
+  MiniTest.expect.equality(cmd[#cmd], sid[has_arg(sid, "--session-id") + 1])
+  MiniTest.expect.equality(cmd[#cmd - 1], "--session-id")
 end
 
 local function test_invalid_session_option_errors()
@@ -1272,6 +1297,10 @@ T["PiAskSelection"]["uses live visual range when invoked from visual mode"] = te
 T["PiAskSelection"]["uses explicit command range"] = test_selection_uses_explicit_command_range
 T["PiAskSelection"]["omits range in label without a selection"] = test_selection_label_omits_range_without_selection
 T["PiAskSelection"]["includes only overlapping diagnostics when enabled"] = test_pi_ask_selection_includes_only_overlapping_diagnostics_when_enabled
+
+T["PiOpen"] = MiniTest.new_set()
+T["PiOpen"]["requires session saving"] = test_pi_open_requires_session
+T["PiOpen"]["launches tmux window with session id"] = test_pi_open_launches_tmux_window_with_session_id
 
 T["Session"] = MiniTest.new_set()
 T["Session"]["handles chunked stdout and notifies on success"] = test_chunked_stdout_updates_and_success_notifies_done

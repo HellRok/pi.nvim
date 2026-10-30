@@ -34,3 +34,8 @@ end, { desc = "Toggle pi session saving" })
 vim.api.nvim_create_user_command("PiLog", function()
   require("pi").show_log()
 end, { desc = "Show pi session log" })
+
+-- Open interactive pi in a new tmux window, sharing this Neovim's session.
+vim.api.nvim_create_user_command("PiOpen", function()
+  require("pi").open()
+end, { desc = "Open pi in a new tmux window with the current session" })

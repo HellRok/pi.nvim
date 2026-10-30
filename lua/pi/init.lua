@@ -33,8 +33,7 @@ local function build_append_system_prompt(cfg)
     return table.concat(prompts, "\n\n")
 end
 
-function M.get_cmd()
-    local cfg = config.get()
+local function get_binary(cfg)
     local binary = { "pi" }
     if cfg.binary then
         if type(cfg.binary) == "table" then
@@ -46,8 +45,26 @@ function M.get_cmd()
             binary = { vim.fn.expand(cfg.binary) }
         end
     end
-    local cmd = vim.list_extend(binary, { "--mode", "rpc" })
-    if not cfg.session then
+    return binary
+end
+
+-- One pi session id per Neovim instance, created lazily on first use.
+local nvim_session_id = nil
+
+local function get_session_id()
+    if not nvim_session_id then
+        nvim_session_id = string.format("nvim-%d-%d", vim.fn.getpid(), os.time())
+    end
+    return nvim_session_id
+end
+
+function M.get_cmd()
+    local cfg = config.get()
+    local cmd = vim.list_extend(get_binary(cfg), { "--mode", "rpc" })
+    if cfg.session then
+        table.insert(cmd, "--session-id")
+        table.insert(cmd, get_session_id())
+    else
         table.insert(cmd, "--no-session")
     end
     if not cfg.extensions then
@@ -439,6 +456,30 @@ function M.toggle_session()
     local enabled = config.toggle_session()
     vim.notify("pi.nvim: session saving " .. (enabled and "enabled" or "disabled"), vim.log.levels.INFO)
     return enabled
+end
+
+--- Opens a new tmux window running interactive pi on this Neovim's session.
+function M.open()
+    local cfg = config.get()
+    if not cfg.session then
+        vim.notify("PiOpen requires session saving (set session = true or :PiToggleSession)", vim.log.levels.ERROR)
+        return
+    end
+    if (vim.env.TMUX or "") == "" then
+        vim.notify("PiOpen requires running Neovim inside tmux", vim.log.levels.ERROR)
+        return
+    end
+    local pi_cmd = vim.list_extend(get_binary(cfg), { "--session-id", get_session_id() })
+    local cmd = { "tmux", "new-window", "-c", vim.fn.getcwd() }
+    vim.list_extend(cmd, pi_cmd)
+    local ok, err = pcall(vim.system, cmd, { text = true }, vim.schedule_wrap(function(result)
+        if result.code ~= 0 then
+            vim.notify("PiOpen failed: " .. (result.stderr or ""), vim.log.levels.ERROR)
+        end
+    end))
+    if not ok then
+        vim.notify("PiOpen failed: " .. tostring(err), vim.log.levels.ERROR)
+    end
 end
 
 function M.is_running()
