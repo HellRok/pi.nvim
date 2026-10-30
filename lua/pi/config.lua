@@ -10,6 +10,13 @@ local VALID_THINKING_LEVELS = {
   xhigh = true,
 }
 
+local VALID_UI_BACKENDS = {
+  auto = true,
+  virtualtext = true,
+  notify = true,
+  float = true,
+}
+
 M.defaults = {
   binary = "pi",
   provider = nil,
@@ -33,6 +40,11 @@ M.defaults = {
   skills = true,
   extensions = true,
   session = false,
+  ui = {
+    backend = "auto",
+    linger_ms = 1500,
+    error_ms = 5000,
+  },
 }
 
 local values = vim.deepcopy(M.defaults)
@@ -102,6 +114,20 @@ function M.validate(opts)
   end
   if opts.session ~= nil and type(opts.session) ~= "boolean" then
     error("pi.nvim: session must be a boolean")
+  end
+  if opts.ui ~= nil then
+    if type(opts.ui) ~= "table" then
+      error("pi.nvim: ui must be a table")
+    end
+    if opts.ui.backend ~= nil and not VALID_UI_BACKENDS[opts.ui.backend] then
+      error("pi.nvim: ui.backend must be one of: auto, virtualtext, notify, float")
+    end
+    if opts.ui.linger_ms ~= nil then
+      validate_number("ui.linger_ms", opts.ui.linger_ms)
+    end
+    if opts.ui.error_ms ~= nil then
+      validate_number("ui.error_ms", opts.ui.error_ms)
+    end
   end
   if opts.thinking ~= nil then
     if type(opts.thinking) ~= "string" then

@@ -241,6 +241,13 @@ function M.run(opts)
     session.last_message = message
     session.skip_reload = skip_reload
     session.on_done = on_done
+    local source_win = vim.api.nvim_get_current_win()
+    if vim.api.nvim_win_get_buf(source_win) == source_bufnr then
+        session.source_winnr = source_win
+    end
+    session.anchor_line = opts.anchor_line
+        or (session.source_winnr and vim.api.nvim_win_get_cursor(session.source_winnr)[1])
+        or 1
     active_session = session
     last_session = session
     ui.open(session)
@@ -362,6 +369,7 @@ function M.prompt_with_selection(opts)
             M.run({
                 message = input,
                 bufnr = bufnr,
+                anchor_line = range and range.start,
                 build_context = function()
                     return context.get_visual_context(bufnr, config.get(), range)
                 end,

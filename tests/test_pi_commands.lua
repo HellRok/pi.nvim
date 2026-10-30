@@ -15,6 +15,7 @@ local function setup_test_env(setup_code)
       table.insert(_G.__pi_test_notifications, { msg = msg, level = level })
     end
   ]])
+  child.lua([[require("pi.config").defaults.ui.backend = "notify"]])
   child.lua(setup_code or 'require("pi").setup({})')
 end
 
@@ -964,6 +965,116 @@ local function test_run_stdin_write_failure_kills_process_and_finishes_with_erro
   MiniTest.expect.no_equality(last_notification().msg:match("write boom"), nil)
 end
 
+--- Switches the child to the real default (`auto`) UI backend.
+local function use_virtualtext(ui_opts)
+  child.lua(
+    [[
+      require("pi.config").defaults.ui.backend = "auto"
+      require("pi").setup({ ui = ... })
+    ]],
+    { ui_opts or {} }
+  )
+end
+
+local function status_marks()
+  return child.lua_get([[
+    (function()
+      local ns = vim.api.nvim_create_namespace("pi_status")
+      local out = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })) do
+        out[#out + 1] = { line = m[2] + 1, text = m[4].virt_text[1][1], hl = m[4].virt_text[1][2], pos = m[4].virt_text_pos }
+      end
+      return out
+    end)()
+  ]])
+end
+
+local function test_virtualtext_shows_status_at_cursor_line()
+  setup_test_env()
+  use_virtualtext()
+  setup_buffer({ "a", "b", "c" }, "/test/vt.lua")
+  set_cursor(2)
+
+  local system = run_pi_ask("go")
+  local marks = status_marks()
+  MiniTest.expect.equality(#marks, 1)
+  MiniTest.expect.equality(marks[1].line, 2)
+  MiniTest.expect.equality(marks[1].pos, "eol")
+  MiniTest.expect.equality(marks[1].hl, "PiStatus")
+  MiniTest.expect.equality(marks[1].text:match("Pi collecting context") ~= nil or marks[1].text:match("Pi starting") ~= nil, true)
+  MiniTest.expect.equality(child.lua_get([[require("pi")._get_active_session().ui_backend]]), "virtualtext")
+  MiniTest.expect.equality(#child.lua_get([[_G.__pi_test_notifications]]), 0)
+
+  system.stdout('{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta"}}\n')
+  flush()
+  marks = status_marks()
+  MiniTest.expect.equality(#marks, 1)
+  MiniTest.expect.equality(marks[1].text:match("Pi thinking") ~= nil, true)
+
+  system.stdout('{"type":"tool_execution_start","toolName":"read"}\n')
+  flush()
+  marks = status_marks()
+  MiniTest.expect.equality(#marks, 1)
+  MiniTest.expect.equality(marks[1].text:match("Pi calling tool: read") ~= nil, true)
+end
+
+local function test_virtualtext_anchors_to_selection_start()
+  setup_test_env()
+  use_virtualtext()
+  setup_buffer({ "a", "b", "c", "d" }, "/test/vt.lua")
+  set_cursor(4)
+
+  run_pi_ask_selection("go", 2, 3)
+  local marks = status_marks()
+  MiniTest.expect.equality(#marks, 1)
+  MiniTest.expect.equality(marks[1].line, 2)
+end
+
+local function test_virtualtext_clears_when_session_ends()
+  setup_test_env()
+  use_virtualtext()
+  setup_buffer({ "a" }, "/test/vt.lua")
+
+  local system = run_pi_ask("go")
+  MiniTest.expect.equality(#status_marks(), 1)
+  system.stdout('{"type":"agent_end"}\n')
+  system.exit(0, 0)
+  MiniTest.expect.equality(#status_marks(), 0)
+
+  -- A fresh run clears stale marks at start and cancel clears too.
+  child.lua([[vim.api.nvim_buf_set_extmark(0, vim.api.nvim_create_namespace("pi_status"), 0, 0, { virt_text = { { "stale" } } })]])
+  system = run_pi_ask("again")
+  MiniTest.expect.equality(#status_marks(), 1)
+  MiniTest.expect.equality(status_marks()[1].text == "stale", false)
+  child.cmd("PiCancel")
+  MiniTest.expect.equality(#status_marks(), 0)
+end
+
+local function test_ui_backend_selection()
+  local function backend_for(name)
+    setup_test_env()
+    use_virtualtext({ backend = name })
+    setup_buffer({ "a" }, "/test/vt.lua")
+    run_pi_ask("go")
+    local backend = child.lua_get([[require("pi")._get_active_session().ui_backend]])
+    local marks = #status_marks()
+    return backend, marks
+  end
+
+  local backend, marks = backend_for("auto")
+  MiniTest.expect.equality({ backend, marks }, { "virtualtext", 1 })
+  backend, marks = backend_for("virtualtext")
+  MiniTest.expect.equality({ backend, marks }, { "virtualtext", 1 })
+  backend, marks = backend_for("notify")
+  MiniTest.expect.equality({ backend, marks }, { "notify", 0 })
+  backend, marks = backend_for("float")
+  MiniTest.expect.equality({ backend, marks }, { "float", 0 })
+
+  setup_test_env()
+  local ok = child.lua_get([[(pcall(require("pi").setup, { ui = { backend = "bogus" } }))]])
+  MiniTest.expect.equality(ok, false)
+end
+
 local T = MiniTest.new_set()
 
 T["PiAsk"] = MiniTest.new_set()
@@ -1015,5 +1126,11 @@ T["run API"]["skip_reload prevents buffer reload"] = test_run_skip_reload_preven
 T["run API"]["build_context error finishes with error"] = test_run_build_context_error_finishes_with_error
 T["run API"]["startup failure finishes with error"] = test_run_startup_failure_finishes_with_error
 T["run API"]["stdin write failure kills process and finishes with error"] = test_run_stdin_write_failure_kills_process_and_finishes_with_error
+
+T["virtualtext"] = MiniTest.new_set()
+T["virtualtext"]["shows status at cursor line"] = test_virtualtext_shows_status_at_cursor_line
+T["virtualtext"]["anchors to selection start"] = test_virtualtext_anchors_to_selection_start
+T["virtualtext"]["clears when session ends"] = test_virtualtext_clears_when_session_ends
+T["virtualtext"]["backend selection"] = test_ui_backend_selection
 
 return T

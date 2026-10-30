@@ -2,6 +2,11 @@ local M = {}
 
 local spinner = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
 
+local ns = vim.api.nvim_create_namespace("pi_status")
+
+vim.api.nvim_set_hl(0, "PiStatus", { link = "Comment", default = true })
+vim.api.nvim_set_hl(0, "PiStatusError", { link = "DiagnosticError", default = true })
+
 local active_statuses = {
   collecting_context = true,
   starting = true,
@@ -33,20 +38,20 @@ end
 
 local function title_for(session)
   if session.status == "error" then
-    return session.ui_backend == "notify" and "pi error" or " pi error "
+    return session.ui_backend ~= "float" and "pi error" or " pi error "
   end
-  return session.ui_backend == "notify" and "pi" or " pi "
+  return session.ui_backend ~= "float" and "pi" or " pi "
 end
 
 local function status_line(session)
   local prefix = ""
-  if session.ui_backend == "float" and active_statuses[session.status] then
+  if session.ui_backend ~= "notify" and active_statuses[session.status] then
     session.spinner_idx = ((session.spinner_idx or 0) % #spinner) + 1
     prefix = spinner[session.spinner_idx] .. " "
   end
 
   if session.status == "running_tool" and session.active_tool then
-    return prefix .. (session.ui_backend == "notify" and "Pi calling tool: " or "Running tool: ") .. session.active_tool
+    return prefix .. (session.ui_backend ~= "float" and "Pi calling tool: " or "Running tool: ") .. session.active_tool
   end
 
   local notify_labels = {
@@ -72,7 +77,7 @@ local function status_line(session)
     cancelled = "Cancelled",
   }
 
-  local labels = session.ui_backend == "notify" and notify_labels or float_labels
+  local labels = session.ui_backend ~= "float" and notify_labels or float_labels
   local message = labels[session.status]
   if not message then
     return nil
@@ -130,8 +135,37 @@ local function render_float(session)
   end
 end
 
+local function render_virtualtext(session)
+  local bufnr = session.source_bufnr
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return
+  end
+  local text = status_line(session)
+  if not text then
+    return
+  end
+
+  local line = math.min(math.max(session.anchor_line or 1, 1), vim.api.nvim_buf_line_count(bufnr))
+  session.anchor_line = line
+  session.status_extmark = vim.api.nvim_buf_set_extmark(bufnr, ns, line - 1, 0, {
+    id = session.status_extmark,
+    virt_text = { { text, session.status == "error" and "PiStatusError" or "PiStatus" } },
+    virt_text_pos = "eol",
+  })
+end
+
+local function clear_virtualtext(session)
+  local bufnr = session.source_bufnr
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+  end
+  session.status_extmark = nil
+end
+
 local function render(session)
-  if session.ui_backend == "notify" then
+  if session.ui_backend == "virtualtext" then
+    render_virtualtext(session)
+  elseif session.ui_backend == "notify" then
     render_notify(session)
   else
     render_float(session)
@@ -147,13 +181,14 @@ local function stop_timer(session)
 end
 
 local function ensure_timer(session)
-  if session.ui_backend ~= "float" or session.ui_timer or not active_statuses[session.status] then
+  if session.ui_backend == "notify" or session.ui_timer or not active_statuses[session.status] then
     return
   end
 
   session.ui_timer = vim.loop.new_timer()
   session.ui_timer:start(100, 100, vim.schedule_wrap(function()
-    if not is_session_buffer_valid(session) or not active_statuses[session.status] then
+    local alive = session.ui_backend == "virtualtext" or is_session_buffer_valid(session)
+    if not alive or not active_statuses[session.status] then
       stop_timer(session)
       return
     end
@@ -192,8 +227,25 @@ local function open_float(session, focus)
   vim.wo[session.winnr].winfixbuf = true
 end
 
+local function pick_backend(session)
+  local configured = require("pi.config").get().ui.backend
+  if configured == "auto" or configured == "virtualtext" then
+    local bufnr = session.source_bufnr
+    if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+      return "virtualtext"
+    end
+  elseif configured ~= nil and configured ~= "auto" then
+    return configured
+  end
+  return has_rich_notify() and "notify" or "float"
+end
+
 function M.open(session, focus)
-  session.ui_backend = has_rich_notify() and "notify" or "float"
+  session.ui_backend = pick_backend(session)
+
+  if session.ui_backend == "virtualtext" then
+    vim.api.nvim_buf_clear_namespace(session.source_bufnr, ns, 0, -1)
+  end
 
   if session.ui_backend == "float" then
     open_float(session, focus)
@@ -211,12 +263,26 @@ function M.update(session)
     ensure_timer(session)
   else
     stop_timer(session)
+    if session.ui_backend == "virtualtext" then
+      clear_virtualtext(session)
+      return
+    end
   end
   render(session)
 end
 
 function M.close(session)
   stop_timer(session)
+
+  if session.ui_backend == "virtualtext" then
+    if session.cancelled then
+      session.status = "cancelled"
+    elseif session.status ~= "error" then
+      session.status = "done"
+    end
+    clear_virtualtext(session)
+    return
+  end
 
   if session.ui_backend == "float" then
     if is_session_window_valid(session) then
