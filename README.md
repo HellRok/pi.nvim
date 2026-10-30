@@ -77,6 +77,11 @@ require("pi").setup({
   skills = true,
   extensions = true,
   session = false,
+  ui = {
+    backend = "auto",
+    linger_ms = 1500,
+    error_ms = 5000,
+  },
 })
 ```
 
@@ -96,6 +101,10 @@ require("pi").setup({
 | `skills` | `true` | Whether pi discovers and loads skills. Set to `false` to pass `--no-skills`. |
 | `extensions` | `true` | Whether pi discovers and loads extensions. Set to `false` to pass `--no-extensions`. |
 | `session` | `false` | Whether pi saves each request as a session on disk. When `false`, pi.nvim passes `--no-session`. Saved sessions can be reopened from the CLI with `pi --resume`. Toggle at runtime with `:PiToggleSession`. |
+
+| `ui.backend` | `"auto"` | How progress is shown. See [UI backend](#ui-backend). |
+| `ui.linger_ms` | `1500` | How long the final "done"/"cancelled" text stays visible (virtualtext backend). |
+| `ui.error_ms` | `5000` | Maximum time an error stays visible (virtualtext backend). It also clears on `CursorMoved` or `InsertEnter`. |
 
 Use `pi --list-models` to see available models.
 
@@ -145,10 +154,28 @@ vim.keymap.set("v", "<leader>ai", ":PiAskSelection<CR>", { desc = "Ask pi (selec
 | `:PiToggleSession` | Normal | Toggle whether pi saves sessions to disk (see `session` config) |
 | `:PiLog` | Normal | Open the session log in a new split |
 
+### UI backend
+
+`ui.backend` controls how progress is displayed:
+
+| Value | Behavior |
+|-------|----------|
+| `"auto"` (default) | Uses `virtualtext` when the source buffer is valid, otherwise falls back to `notify` (if `nvim-notify` or `mini.notify` is available) or `float`. |
+| `"virtualtext"` | A single status line (e.g. `⠋ Pi thinking...`, `⠋ Pi calling tool: read`) as end-of-line virtual text. |
+| `"notify"` | A `vim.notify` message per status change. |
+| `"float"` | A small floating window with status and recent output. |
+
+With `virtualtext`:
+
+- The status follows the anchor line through edits. If pi's edits delete the line, it moves to your cursor line (or the nearest remaining line if the window is gone).
+- When a run finishes, the final text stays for `ui.linger_ms` (done/cancelled) or until `ui.error_ms` / `CursorMoved` / `InsertEnter` (error), then clears.
+- Exactly one `vim.notify` fires on completion: INFO (done), WARN (cancelled) or ERROR (error). If the source buffer was wiped mid-run, this notification is the only output.
+- Highlights: `PiStatus` (links to `Comment`) and `PiStatusError` (links to `DiagnosticError`). Both are defined with `default = true`, so you can override them.
+
 ## Behavior
 
 - Runs asynchronously and keeps editing nonblocking.
-- Uses `nvim-notify` or `mini.notify` for status updates when available; otherwise falls back to a small floating status window.
+- Shows progress as a spinner in virtual text at the end of the line where you ran the command (the first line of the selection for `:PiAskSelection`). See [UI backend](#ui-backend).
 - Reloads changed loaded buffers on success so pi's on-disk edits are reflected in Neovim.
 - Treats sent buffer/selection context as newer than disk, so unsaved Neovim changes are the source of truth for the agent.
 - Optionally includes Neovim diagnostics from LSPs/linters via `vim.diagnostic`.
